@@ -50,16 +50,10 @@ def setup_logging():
     file_handler.setFormatter(log_formatter)
     file_handler.setLevel(LOGGING_LEVEL)
     
-    # 创建一个 StreamHandler 用于控制台输出
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(log_formatter)
-    console_handler.setLevel(LOGGING_LEVEL)
-    
     # 获取根日志记录器并添加处理器
     root_logger = logging.getLogger()
     root_logger.setLevel(LOGGING_LEVEL)
     root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
 
 def turn_off_screen():
     """关闭手机屏幕函数"""
@@ -137,7 +131,7 @@ def control_lock(action, client, retry=True):
     try:
         subprocess.run(cmd, shell=True, check=True)
         logging.info(f"执行{action}操作")
-        time.sleep(2)  # 等待操作完成
+        time.sleep(3)  # 等待操作完成
         
         status = check_lock_status()
         if status == "unlinked":
