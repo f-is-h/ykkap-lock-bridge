@@ -24,16 +24,21 @@ MQTT_STATE_TOPIC = "home/doorlock/state"
 ADB_DEVICE = os.environ.get('ADB_DEVICE', '192.168.11.135:5555')
 
 # 点击坐标（根据您的应用界面调整）
-UNLOCK_COORDS = "750 1200"        # 解锁按钮的x y坐标
-LOCK_COORDS = "330 1200"          # 锁定按钮的x y坐标
-RELEASE_SLEEP_MODE = "530 1440"   # 解除睡眠按钮的x y坐标
+UNLOCK_COORDS = "750 1200"        # 解锁按钮的坐标
+LOCK_COORDS = "330 1200"          # 锁定按钮的坐标
+RELEASE_SLEEP_MODE = "530 1440"   # 解除睡眠按钮的坐标
+LAUNCH_OK_BUTTON = "900 1120"     # 启动时允许使用蓝牙OK按键的坐标
 
 # 颜色检查坐标和阈值
 COLOR_CHECK_COORDS = "140 380"
-UNLOCK_COLOR = (194, 23, 45)     # 未锁定状态的红色阈值
-LOCKED_COLOR = (0, 168, 135)     # 锁定状态的绿色阈值
-UNLINKED_COLOR = (130, 130, 130) # 未连接锁时的灰色阈值
-COLOR_TOLERANCE = 10                  # 定义颜色匹配的容差
+UNLOCK_COLOR = (194, 23, 45)      # 未锁定状态的红色阈值
+LOCKED_COLOR = (0, 168, 135)      # 锁定状态的绿色阈值
+UNLINKED_COLOR = (130, 130, 130)  # 未连接锁时的灰色阈值
+COLOR_TOLERANCE = 10              # 定义颜色匹配的容差
+
+# 定时检查门锁状态时间
+START_HOUR = 7
+STOP_HOUR = 22
 
 # 全局变量用于存储MQTT客户端
 mqtt_client = None
@@ -61,7 +66,7 @@ def turn_off_screen():
     try:
         result = subprocess.run(cmd, shell=True, check=False, capture_output=True, text=True)
         if "Display mode: 0" in result.stdout:
-            logging.info("成功关闭手机屏幕")
+            logging.info("成功关闭手机屏幕.")
             return True
         else:
             logging.error(f"关闭手机屏幕失败: {result.stdout}")
@@ -72,12 +77,12 @@ def turn_off_screen():
 
 def on_connect(client, userdata, flags, rc, properties=None):
     """MQTT连接成功后的回调函数"""
-    logging.info(f"Connected with result code {rc}")
+    logging.info(f"连接成功，返回码: {rc}")
     client.subscribe(MQTT_TOPIC)
 
 def on_message(client, userdata, msg):
     """接收到MQTT消息后的回调函数"""
-    logging.info(f"Received message: {msg.topic} {str(msg.payload)}")
+    logging.info(f"收到MQTT消息: {msg.topic} {str(msg.payload)}")
     if msg.payload == b"UNLOCK":
         control_lock("unlock", client)
     elif msg.payload == b"LOCK":
@@ -94,8 +99,8 @@ def release_sleep_mode():
     cmd_release_sleep = f"adb -s {ADB_DEVICE} shell input tap {RELEASE_SLEEP_MODE}"
     try:
         subprocess.run(cmd_release_sleep, shell=True, check=True)
-        logging.info("执行【スリープモード解除】操作成功")
-        time.sleep(3)  # 等待3秒
+        logging.info("执行【スリープモード解除】操作成功.")
+        time.sleep(1)  # 等待1秒
     except subprocess.CalledProcessError as e:
         logging.error(f"执行【スリープモード解除】操作失败: {e}")
 
@@ -104,19 +109,19 @@ def check_lock_status():
     release_sleep_mode()
     image = capture_screen()
     pixel = image.getpixel(tuple(map(int, COLOR_CHECK_COORDS.split())))
-    logging.info(f"Detected color at check coordinates: {pixel}")
+    logging.info(f"在坐标处检测到颜色: {pixel}")
 
     def color_matches(color1, color2, tolerance):
         return all(abs(c1 - c2) <= tolerance for c1, c2 in zip(color1[:3], color2[:3]))
 
     if color_matches(pixel, UNLOCK_COLOR, COLOR_TOLERANCE):
-        logging.info("检测到未锁定状态（红色）")
+        logging.info("检测到未锁定状态（红色）.")
         return "unlocked"
     elif color_matches(pixel, LOCKED_COLOR, COLOR_TOLERANCE):
-        logging.info("检测到锁定状态（绿色）")
+        logging.info("检测到锁定状态（绿色）.")
         return "locked"
     elif color_matches(pixel, UNLINKED_COLOR, COLOR_TOLERANCE):
-        logging.warning("检测到未连接状态（灰色）")
+        logging.warning("检测到未连接状态（灰色）.")
         return "unlinked"
     else:
         logging.warning(f"无法匹配颜色: {pixel}")
@@ -135,20 +140,37 @@ def control_lock(action, client, retry=True):
         
         status = check_lock_status()
         if status == "unlinked":
-            logging.warning("门锁未连接,无法执行操作")
+            logging.warning("门锁未连接,无法执行操作!")
             client.publish(MQTT_STATE_TOPIC, "UNLINKED")
         elif (action == "unlock" and status == "unlocked") or (action == "lock" and status == "locked"):
-            logging.info(f"{action}操作成功")
+            logging.info(f"{action}操作成功.")
             client.publish(MQTT_STATE_TOPIC, status.upper())
         elif retry:
-            logging.warning(f"{action}操作未成功,重试")
+            logging.warning(f"{action}操作未成功,重试...")
+            save_screenshot(action, True)  # 保存屏幕截图
             control_lock(action, client, retry=False)  # 重试一次
         else:
-            logging.error(f"{action}操作失败")
+            logging.error(f"{action}操作失败!")
             client.publish(MQTT_STATE_TOPIC, "UNKNOWN")
+            save_screenshot(action)  # 保存屏幕截图
     except subprocess.CalledProcessError as e:
         logging.error(f"执行{action}操作失败: {e}")
         client.publish(MQTT_STATE_TOPIC, "ERROR")
+        save_screenshot(action)  # 保存屏幕截图
+
+def save_screenshot(action, retry=False):
+    """保存屏幕截图（用于调试）"""
+    logging.info("开始保存屏幕截图...")
+    current_time = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    filename = f"{'@retry_' if retry else ''}{action}_{current_time}.png"
+    file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    
+    cmd = f"adb -s {ADB_DEVICE} exec-out screencap -p > {file_path}"
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+        logging.info(f"屏幕截图已保存: {filename}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"保存屏幕截图失败: {e}")
 
 def check_adb_connection():
     """检查ADB连接状态"""
@@ -161,10 +183,42 @@ def check_adb_connection():
         logging.error(f"ADB连接失败: {e}")
         return False
 
+def is_app_running():
+    """检查指定的应用是否在前台运行"""
+    cmd = "adb shell \"su -c 'dumpsys activity activities | grep mResumedActivity'\""
+    try:
+        output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT).decode('utf-8')
+        return "com.alpha.lockapp/.MainActivity" in output
+    except subprocess.CalledProcessError:
+        logging.error("检查应用状态时出错!")
+        return False
+
+def launch_app():
+    """启动指定的应用并点击OK按钮"""
+    cmd = "adb shell am start -n com.alpha.lockapp/.MainActivity"
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+        logging.info("应用启动命令已执行...")
+        time.sleep(5)  # 等待5秒让应用启动
+        
+        # 点击OK按钮
+        cmd_click = f"adb -s {ADB_DEVICE} shell input tap {LAUNCH_OK_BUTTON}"
+        subprocess.run(cmd_click, shell=True, check=True)
+        logging.info("已点击OK按钮. 等待15秒与门锁连接...")
+        time.sleep(15)  # 等待15秒让应用与门锁连接
+        logging.info("连接成功.")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"启动应用或点击OK按钮失败: {e}")
+
 def periodic_status_check():
     """定期检查门锁状态的函数"""
     current_time = datetime.datetime.now().time()
-    if datetime.time(7, 0) <= current_time <= datetime.time(22, 0):
+    # 在特定时间段内检查门锁状态
+    if datetime.time(START_HOUR, 0) <= current_time <= datetime.time(STOP_HOUR, 0):
+        if not is_app_running():
+            logging.info("应用未运行，正在启动应用...")
+            launch_app()
+        
         status = check_lock_status()
         if status == "unlocked":
             logging.info("定期检查: 门锁已解锁")
@@ -183,11 +237,11 @@ def periodic_status_check():
 if __name__ == "__main__":
     # 设置日志
     setup_logging()
-    logging.info("Door Lock Control 程序启动")
+    logging.info("智能门锁程序启动...")
 
     # 首先检查并确保ADB连接
     if not check_adb_connection():
-        logging.error("无法连接到Android设备，请检查网络连接和ADB设置")
+        logging.error("无法连接到Android设备, 请检查网络连接和ADB设置!")
         exit(1)
 
     # 关闭手机屏幕
@@ -202,8 +256,8 @@ if __name__ == "__main__":
     try:
         mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
         
-        # 设置定时任务，每5分钟执行一次
-        schedule.every(5).minutes.do(periodic_status_check)
+        # 设置定时任务，每10分钟执行一次
+        schedule.every(10).minutes.do(periodic_status_check)
         
         # 启动MQTT客户端循环
         mqtt_client.loop_start()
