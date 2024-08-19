@@ -127,7 +127,7 @@ def check_lock_status():
         logging.warning(f"无法匹配颜色: {pixel}")
         return "unknown"
 
-def control_lock(action, client, retry=True):
+def control_lock(action, client, retry=2):
     """控制门锁的锁定或解锁"""
     release_sleep_mode()
 
@@ -145,10 +145,11 @@ def control_lock(action, client, retry=True):
         elif (action == "unlock" and status == "unlocked") or (action == "lock" and status == "locked"):
             logging.info(f"{action}操作成功.")
             client.publish(MQTT_STATE_TOPIC, status.upper())
-        elif retry:
+        elif retry > 0:
             logging.warning(f"{action}操作未成功,重试...")
             save_screenshot(action, True)  # 保存屏幕截图
-            control_lock(action, client, retry=False)  # 重试一次
+            retry -= 1
+            control_lock(action, client, retry)  # 重试
         else:
             logging.error(f"{action}操作失败!")
             client.publish(MQTT_STATE_TOPIC, "UNKNOWN")
@@ -163,7 +164,7 @@ def save_screenshot(action, retry=False):
     logging.info("开始保存屏幕截图...")
     current_time = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     filename = f"{'@retry_' if retry else ''}{action}_{current_time}.png"
-    file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'errshot', filename)
     
     cmd = f"adb -s {ADB_DEVICE} exec-out screencap -p > {file_path}"
     try:
