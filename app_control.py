@@ -1,14 +1,13 @@
-import paho.mqtt.client as mqtt
-import subprocess
-import time
-from PIL import Image
-import io
-import schedule
-import datetime
-import logging
-from logging.handlers import RotatingFileHandler
-import sys
 import os
+import io
+import time
+import logging
+import datetime
+import schedule
+import subprocess
+from PIL import Image
+import paho.mqtt.client as mqtt
+from logging.handlers import RotatingFileHandler
 
 # 设置日志级别
 LOGGING_LEVEL = os.environ.get('LOGGING_LEVEL', 'INFO')
@@ -19,6 +18,7 @@ MQTT_BROKER = os.environ.get('MQTT_BROKER', '192.168.11.5')
 MQTT_PORT = int(os.environ.get('MQTT_PORT', 21883))
 MQTT_TOPIC = "home/doorlock/set"
 MQTT_STATE_TOPIC = "home/doorlock/state"
+MQTT_CHECK_TOPIC = "home/doorlock/check_status"
 
 # ADB设置
 ADB_DEVICE = os.environ.get('ADB_DEVICE', '192.168.11.135:5555')
@@ -60,6 +60,17 @@ def setup_logging():
     root_logger.setLevel(LOGGING_LEVEL)
     root_logger.addHandler(file_handler)
 
+def check_adb_connection():
+    """检查ADB连接状态"""
+    cmd = f"adb connect {ADB_DEVICE}"
+    try:
+        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        logging.info(f"ADB连接结果: {result.stdout.strip()}")
+        return "connected" in result.stdout.lower()
+    except subprocess.CalledProcessError as e:
+        logging.error(f"ADB连接失败: {e}")
+        return False
+
 def turn_off_screen():
     """关闭手机屏幕函数"""
     cmd = f"adb -s {ADB_DEVICE} shell CLASSPATH=/mnt/sdcard/Documents/DisplayToggle.dex app_process / DisplayToggle 0"
@@ -79,20 +90,18 @@ def on_connect(client, userdata, flags, rc, properties=None):
     """MQTT连接成功后的回调函数"""
     logging.info(f"连接成功，返回码: {rc}")
     client.subscribe(MQTT_TOPIC)
+    client.subscribe(MQTT_CHECK_TOPIC)
 
 def on_message(client, userdata, msg):
     """接收到MQTT消息后的回调函数"""
     logging.info(f"收到MQTT消息: {msg.topic} {str(msg.payload)}")
-    if msg.payload == b"UNLOCK":
-        control_lock("unlock", client)
-    elif msg.payload == b"LOCK":
-        control_lock("lock", client)
-
-def capture_screen():
-    """捕获Android设备屏幕截图"""
-    cmd = f"adb -s {ADB_DEVICE} exec-out screencap -p"
-    result = subprocess.run(cmd, shell=True, capture_output=True)
-    return Image.open(io.BytesIO(result.stdout))
+    if msg.topic == MQTT_TOPIC:
+        if msg.payload == b"UNLOCK":
+            control_lock("unlock", client)
+        elif msg.payload == b"LOCK":
+            control_lock("lock", client)
+    elif msg.topic == MQTT_CHECK_TOPIC:
+        check_and_publish_status(client)
 
 def release_sleep_mode():
     """解除Android设备的睡眠模式"""
@@ -126,6 +135,12 @@ def check_lock_status():
     else:
         logging.warning(f"无法匹配颜色: {pixel}")
         return "unknown"
+
+def capture_screen():
+    """捕获Android设备屏幕截图"""
+    cmd = f"adb -s {ADB_DEVICE} exec-out screencap -p"
+    result = subprocess.run(cmd, shell=True, capture_output=True)
+    return Image.open(io.BytesIO(result.stdout))
 
 def control_lock(action, client, retry=2):
     """控制门锁的锁定或解锁"""
@@ -173,16 +188,11 @@ def save_screenshot(action, retry=False):
     except subprocess.CalledProcessError as e:
         logging.error(f"保存屏幕截图失败: {e}")
 
-def check_adb_connection():
-    """检查ADB连接状态"""
-    cmd = f"adb connect {ADB_DEVICE}"
-    try:
-        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
-        logging.info(f"ADB连接结果: {result.stdout.strip()}")
-        return "connected" in result.stdout.lower()
-    except subprocess.CalledProcessError as e:
-        logging.error(f"ADB连接失败: {e}")
-        return False
+def if_app_is_not_running_then_open_it():
+    """如果APP没有在运行则启动它"""
+    if not is_app_running():
+        logging.info("应用未运行，正在启动应用...")
+        launch_app()
 
 def is_app_running():
     """检查指定的应用是否在前台运行"""
@@ -211,28 +221,31 @@ def launch_app():
     except subprocess.CalledProcessError as e:
         logging.error(f"启动应用或点击OK按钮失败: {e}")
 
+def check_and_publish_status(client):
+    """检查锁状态并发布到MQTT"""
+    if_app_is_not_running_then_open_it()
+
+    status = check_lock_status()
+    if status == "unlocked":
+        logging.info("检查结果: 门锁已解锁")
+        client.publish(MQTT_STATE_TOPIC, "UNLOCKED")
+    elif status == "locked":
+        logging.info("检查结果: 门锁已锁定")
+        client.publish(MQTT_STATE_TOPIC, "LOCKED")
+    elif status == "unlinked":
+        logging.warning("检查结果: 门锁未连接")
+        client.publish(MQTT_STATE_TOPIC, "UNLINKED")
+    else:
+        logging.warning("检查结果: 无法确定门锁状态")
+        client.publish(MQTT_STATE_TOPIC, "UNKNOWN")
+    return status
+
 def periodic_status_check():
     """定期检查门锁状态的函数"""
     current_time = datetime.datetime.now().time()
     # 在特定时间段内检查门锁状态
     if datetime.time(START_HOUR, 0) <= current_time <= datetime.time(STOP_HOUR, 0):
-        if not is_app_running():
-            logging.info("应用未运行，正在启动应用...")
-            launch_app()
-        
-        status = check_lock_status()
-        if status == "unlocked":
-            logging.info("定期检查: 门锁已解锁")
-            mqtt_client.publish(MQTT_STATE_TOPIC, "UNLOCKED")
-        elif status == "locked":
-            logging.info("定期检查: 门锁已锁定")
-            mqtt_client.publish(MQTT_STATE_TOPIC, "LOCKED")
-        elif status == "unlinked":
-            logging.warning("定期检查: 门锁未连接")
-            mqtt_client.publish(MQTT_STATE_TOPIC, "UNLINKED")
-        else:
-            logging.warning("定期检查: 无法确定门锁状态")
-            mqtt_client.publish(MQTT_STATE_TOPIC, "UNKNOWN")
+        check_and_publish_status(mqtt_client)
 
 # 主程序
 if __name__ == "__main__":
@@ -244,9 +257,13 @@ if __name__ == "__main__":
     if not check_adb_connection():
         logging.error("无法连接到Android设备, 请检查网络连接和ADB设置!")
         exit(1)
+    time.sleep(30)
+
+    # 启动APP
+    if_app_is_not_running_then_open_it()
+    time.sleep(10)
 
     # 关闭手机屏幕
-    time.sleep(3)
     turn_off_screen()
 
     # MQTT
@@ -257,8 +274,8 @@ if __name__ == "__main__":
     try:
         mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
         
-        # 设置定时任务，每10分钟执行一次
-        schedule.every(10).minutes.do(periodic_status_check)
+        # 设置定时任务，每30分钟执行一次
+        schedule.every(30).minutes.do(periodic_status_check)
         
         # 启动MQTT客户端循环
         mqtt_client.loop_start()
