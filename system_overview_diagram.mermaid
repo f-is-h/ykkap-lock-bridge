@@ -1,0 +1,8 @@
+graph TD
+    U((ユーザー)) -->|操作| A[iPhone\n#40;HomeKit#41;]
+    A -->|指示| C{Home Assistant}
+    C -->|設定| D[MQTTロック定義]
+    C <-->|データ交換| E{MQTTサーバー}
+    F[Dockerコンテナ] <-->|サブスクライブ/パブリッシュ| E
+    F -->|ADBコマンド| G[Androidスマホ]
+    G -->|Bluetooth制御| H((YKK AP\n電気錠))

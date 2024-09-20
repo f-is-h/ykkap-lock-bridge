@@ -1,0 +1,12 @@
+# Ignore any potential log files
+*.log
+
+# Ignore any potential cache directories
+__pycache__/
+.cache/
+
+# Ignore any potential environment files
+.env
+
+# Ignore MacOS .DS_Store files
+.DS_Store

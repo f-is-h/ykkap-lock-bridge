@@ -1,0 +1,25 @@
+version: '3'
+
+services:
+  doorlock-control:
+    image: python:3.9-slim-buster
+    container_name: doorlock-control
+    user: root
+    environment:
+      - TZ=Asia/Tokyo
+      - MQTT_BROKER=192.168.11.5
+      - MQTT_PORT=21883
+      - ADB_DEVICE=192.168.11.135:5555
+      - LOGGING_LEVEL=INFO
+    volumes:
+      - /volume1/docker/door-bridge:/root
+    working_dir: /root
+    command: >
+      bash -c "
+      apt-get update && 
+      apt-get install -y android-tools-adb && 
+      pip install --no-cache-dir paho-mqtt Pillow schedule && 
+      python app_control.py
+      "
+    restart: unless-stopped
+    network_mode: bridge
