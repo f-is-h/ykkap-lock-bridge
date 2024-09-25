@@ -1,0 +1,19 @@
+# Other Settings
+
+# 创建一个虚拟的布尔值来跟踪门锁状态
+input_boolean:
+  fake_door_lock_status:
+    name: "虚拟门锁状态"
+    icon: mdi:lock
+
+# 创建一个模拟的锁实体
+lock:
+  - platform: template
+    name: "家门锁"
+    value_template: "{{ is_state('input_boolean.fake_door_lock_status', 'on') }}"
+    lock:
+      service: script.lock_door
+    unlock:
+      service: script.unlock_door
+
+# Other Settings

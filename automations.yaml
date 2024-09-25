@@ -1,0 +1,25 @@
+# Other Settings
+
+- id: update-door-lock-status
+  alias: 更新门锁状态
+  trigger:
+    - platform: mqtt
+      topic: home/doorlock/state
+  action:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ trigger.payload == 'LOCKED' }}"
+          sequence:
+            - service: input_boolean.turn_on
+              target:
+                entity_id: input_boolean.fake_door_lock_status
+        - conditions:
+            - condition: template
+              value_template: "{{ trigger.payload == 'UNLOCKED' }}"
+          sequence:
+            - service: input_boolean.turn_off
+              target:
+                entity_id: input_boolean.fake_door_lock_status
+
+# Other Settings
