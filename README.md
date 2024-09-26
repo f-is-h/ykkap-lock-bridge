@@ -17,18 +17,18 @@ This project integrates a YKK AP electric lock with Home Assistant using an Andr
 
 ## System Architecture
 
-    ```mermaid
-    graph TD
-        U((User)) -->|Operate| A[iPhone\n#40;HomeKit#41;]
-        A -->|Instruct| C{Home Assistant}
-        C -->|Configure| D[MQTT Lock Definition]
-        C <-->|Data Exchange| E{MQTT Server}
-        F[Docker Container] <-->|Subscribe/Publish| E
-        F -->|ADB Commands| G[Android Smartphone]
-        G -->|Bluetooth Control| H((YKK AP\nElectric Lock))
-        I[Door/Window Sensor] -.->|Optional| C
-        I -.->|State Detection| H
-    ```
+```mermaid
+graph TD
+    U((User)) -->|Operate| A[iPhone\n#40;HomeKit#41;]
+    A -->|Instruct| C{Home Assistant}
+    C -->|Configure| D[MQTT Lock Definition]
+    C |Data Exchange| E{MQTT Server}
+    F[Docker Container] |Subscribe/Publish| E
+    F -->|ADB Commands| G[Android Smartphone]
+    G -->|Bluetooth Control| H((YKK AP\nElectric Lock))
+    I[Door/Window Sensor] -.->|Optional| C
+    I -.->|State Detection| H
+```
 
 ## Prerequisites
 
