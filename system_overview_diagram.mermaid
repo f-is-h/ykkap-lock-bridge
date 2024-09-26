@@ -6,3 +6,5 @@ graph TD
     F[Dockerコンテナ] <-->|サブスクライブ/パブリッシュ| E
     F -->|ADBコマンド| G[Androidスマホ]
     G -->|Bluetooth制御| H((YKK AP\n電気錠))
+    I[ドア/窓センサー] -.->|オプション| C
+    I -.->|状態検知| H
