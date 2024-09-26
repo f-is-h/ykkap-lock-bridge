@@ -1,4 +1,4 @@
-# Smart Door Lock Control
+# YKK AP LOCK BRIDGE
 
 This project aims to convert a YKK AP electric lock with app control capabilities into a smart lock that can be controlled via iPhone's Home app, integrating it with Home Assistant and MQTT.
 
