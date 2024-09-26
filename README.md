@@ -27,7 +27,6 @@ graph TD
     F[Android Smartphone]
     G((YKK AP Electric Lock))
     H[Door Window Sensor]
-
     A --> B
     B --> C
     B  D
