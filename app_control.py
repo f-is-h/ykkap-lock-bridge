@@ -1,9 +1,11 @@
 import os
 import io
+import sys
 import time
 import logging
 import datetime
 import schedule
+import functools
 import subprocess
 from PIL import Image
 import paho.mqtt.client as mqtt
@@ -22,6 +24,8 @@ MQTT_CHECK_TOPIC = "home/doorlock/check_status"
 
 # ADB设置
 ADB_DEVICE = os.environ.get('ADB_DEVICE', '192.168.11.135:5555')
+REBOOT_TIME = '03:00'
+CHECK_INTERVAL = 30
 
 # 点击坐标（根据您的应用界面调整）
 UNLOCK_COORDS = "750 1200"        # 解锁按钮的坐标
@@ -46,6 +50,7 @@ mqtt_client = None
 def setup_logging():
     """配置日志系统"""
     log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
     # 获取当前脚本的目录
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
     LOG_FILE = os.path.join(CURRENT_DIR, 'doorlock.log')
@@ -55,10 +60,16 @@ def setup_logging():
     file_handler.setFormatter(log_formatter)
     file_handler.setLevel(LOGGING_LEVEL)
     
+    # 创建一个 StreamHandler 用于控制台输出
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(log_formatter)
+    console_handler.setLevel(LOGGING_LEVEL)
+    
     # 获取根日志记录器并添加处理器
     root_logger = logging.getLogger()
     root_logger.setLevel(LOGGING_LEVEL)
     root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
 
 def check_adb_connection():
     """检查ADB连接状态"""
@@ -71,6 +82,94 @@ def check_adb_connection():
         logging.error(f"ADB连接失败: {e}")
         return False
 
+def reconnect_adb(device):
+    '''重新连接adb'''
+    max_attempts = 20
+    for attempt in range(max_attempts):
+        try:
+            subprocess.run(f"adb connect {device}", shell=True, check=True)
+            if check_adb_connection():
+                logging.info("ADB 重新连接成功")
+                return True
+        except subprocess.CalledProcessError:
+            logging.warning(f"ADB 重连尝试 {attempt + 1} 失败")
+        time.sleep(5)
+    logging.error("ADB 重连失败")
+    return False
+
+def ensure_adb_connection(func):
+    '''装饰器用以在执行任何adb命令前先检查adb连接并尝试重连'''
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            if not check_adb_connection():
+                logging.warning(f"ADB 连接断开，尝试重新连接...")
+                if not reconnect_adb(ADB_DEVICE):
+                    logging.error("ADB连接失败, 无法执行操作!")
+                    raise
+            return func(*args, **kwargs)
+        except subprocess.CalledProcessError as e:
+            logging.error(f"执行 ADB 命令时出错: {e}")
+            raise
+
+    return wrapper
+
+@ensure_adb_connection
+def reboot_android_device():
+    """重启Android设备"""
+    logging.info("正在重启Android设备...")
+    cmd = f"adb -s {ADB_DEVICE} reboot"
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+        logging.info("重启命令已发送，等待设备重启...")
+        time.sleep(60)  # 等待1分钟让设备完成重启
+        if wait_for_device_after_reboot():
+            logging.info("设备重启完成")
+            if unlock_device():
+                logging.info("设备解锁成功")
+            else:
+                logging.error("设备解锁失败")
+        else:
+            logging.error("等待设备重启超时")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"重启设备时出错: {e}")
+
+def wait_for_device_after_reboot(max_wait_time=300, check_interval=10):
+    """
+    等待设备在重启后重新连接
+    
+    :param max_wait_time: 最大等待时间（秒）
+    :param check_interval: 检查间隔（秒）
+    :return: 如果设备成功连接返回 True，否则返回 False
+    """
+    logging.info(f"等待设备重新连接，最大等待时间: {max_wait_time}秒")
+    start_time = time.time()
+    
+    while time.time() - start_time < max_wait_time:
+        if reconnect_adb(ADB_DEVICE):
+            logging.info("设备已重新连接")
+            return True
+        time.sleep(check_interval)
+    
+    logging.error(f"等待设备重新连接超时（{max_wait_time}秒）")
+    return False
+
+@ensure_adb_connection
+def unlock_device():
+    """解锁设备屏幕"""
+    logging.info("正在解锁设备屏幕...")
+    # 模拟从屏幕底部向上滑动的操作, 屏幕分辨率1080x1920
+    cmd = f"adb -s {ADB_DEVICE} shell input swipe 540 1800 540 800"
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+        logging.info("设备屏幕解锁成功")
+        time.sleep(3)  # 等待解锁动画完成
+    except subprocess.CalledProcessError as e:
+        logging.error(f"解锁设备屏幕时出错: {e}")
+        return False
+    return True
+
+@ensure_adb_connection
 def turn_off_screen():
     """关闭手机屏幕函数"""
     cmd = f"adb -s {ADB_DEVICE} shell CLASSPATH=/mnt/sdcard/Documents/DisplayToggle.dex app_process / DisplayToggle 0"
@@ -103,6 +202,7 @@ def on_message(client, userdata, msg):
     elif msg.topic == MQTT_CHECK_TOPIC:
         check_and_publish_status(client)
 
+@ensure_adb_connection
 def release_sleep_mode():
     """解除Android设备的睡眠模式"""
     cmd_release_sleep = f"adb -s {ADB_DEVICE} shell input tap {RELEASE_SLEEP_MODE}"
@@ -136,12 +236,14 @@ def check_lock_status():
         logging.warning(f"无法匹配颜色: {pixel}")
         return "unknown"
 
+@ensure_adb_connection
 def capture_screen():
     """捕获Android设备屏幕截图"""
     cmd = f"adb -s {ADB_DEVICE} exec-out screencap -p"
     result = subprocess.run(cmd, shell=True, capture_output=True)
     return Image.open(io.BytesIO(result.stdout))
 
+@ensure_adb_connection
 def control_lock(action, client, retry=2):
     """控制门锁的锁定或解锁"""
     release_sleep_mode()
@@ -174,6 +276,7 @@ def control_lock(action, client, retry=2):
         client.publish(MQTT_STATE_TOPIC, "ERROR")
         save_screenshot(action)  # 保存屏幕截图
 
+@ensure_adb_connection
 def save_screenshot(action, retry=False):
     """保存屏幕截图（用于调试）"""
     logging.info("开始保存屏幕截图...")
@@ -194,6 +297,7 @@ def if_app_is_not_running_then_open_it():
         logging.info("应用未运行，正在启动应用...")
         launch_app()
 
+@ensure_adb_connection
 def is_app_running():
     """检查指定的应用是否在前台运行"""
     cmd = "adb shell \"su -c 'dumpsys activity activities | grep mResumedActivity'\""
@@ -204,6 +308,7 @@ def is_app_running():
         logging.error("检查应用状态时出错!")
         return False
 
+@ensure_adb_connection
 def launch_app():
     """启动指定的应用并点击OK按钮"""
     cmd = "adb shell am start -n com.alpha.lockapp/.MainActivity"
@@ -247,24 +352,63 @@ def periodic_status_check():
     if datetime.time(START_HOUR, 0) <= current_time <= datetime.time(STOP_HOUR, 0):
         check_and_publish_status(mqtt_client)
 
+def schedule_daily_reboot():
+    """安排每天凌晨3点重启设备"""
+    schedule.every().day.at("03:00").do(daily_reboot_and_initialize)
+
+def daily_reboot_and_initialize():
+    """每日重启和初始化流程"""
+    reboot_android_device()
+    retry_count = 3
+    while retry_count > 0:
+        if initialize_system():
+            logging.info("每日重启和初始化完成")
+            return
+        else:
+            logging.error(f"初始化失败，剩余重试次数: {retry_count-1}")
+            retry_count -= 1
+            time.sleep(60)  # 等待1分钟后重试
+    logging.critical("每日重启后初始化失败，请手动检查设备状态")
+    if not unlock_device():
+        logging.error("无法解锁设备屏幕!")
+        return False
+
+def initialize_system():
+    """系统初始化"""
+    if not check_adb_connection():
+        logging.error("无法连接到Android设备, 请检查网络连接和ADB设置!")
+        return False
+    time.sleep(10)
+
+    # 如果程序没有在运行则启动
+    if_app_is_not_running_then_open_it()
+    time.sleep(10)
+    # 关闭屏幕
+    turn_off_screen()
+    return True
+
+def schedule_tasks():
+    """安排所有定时任务"""
+    schedule.every().day.at(REBOOT_TIME).do(daily_reboot_and_initialize)
+    schedule.every(CHECK_INTERVAL).minutes.do(periodic_status_check)
+
+def run_pending_and_get_next_run():
+    """检查到下一个定时任务的时长"""
+    schedule.run_pending()
+    return schedule.idle_seconds()
+
 # 主程序
 if __name__ == "__main__":
     # 设置日志
     setup_logging()
     logging.info("智能门锁程序启动...")
+    
+    # 启动定时任务
+    schedule_tasks()
 
-    # 首先检查并确保ADB连接
-    if not check_adb_connection():
-        logging.error("无法连接到Android设备, 请检查网络连接和ADB设置!")
+    if not initialize_system():
+        logging.error("初始化失败，程序退出")
         exit(1)
-    time.sleep(30)
-
-    # 启动APP
-    if_app_is_not_running_then_open_it()
-    time.sleep(10)
-
-    # 关闭手机屏幕
-    turn_off_screen()
 
     # MQTT
     mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -272,18 +416,23 @@ if __name__ == "__main__":
     mqtt_client.on_message = on_message
 
     try:
-        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-        
-        # 设置定时任务，每30分钟执行一次
-        schedule.every(30).minutes.do(periodic_status_check)
-        
+        # MQTT连接
+        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)        
         # 启动MQTT客户端循环
         mqtt_client.loop_start()
         
         # 运行定时任务
         while True:
-            schedule.run_pending()
-            time.sleep(1)
+            # 运行待执行的任务并获取下一个任务的等待时间
+            wait_time = run_pending_and_get_next_run()
+            # 如果下一个任务在30秒以上，稍微休眠长一点
+            if wait_time > 30:
+                time.sleep(30)
+            elif wait_time > 0:
+                time.sleep(wait_time)
+            else:
+                # 如果没有等待时间，仍然短暂休眠以避免CPU过载
+                time.sleep(1)
     except Exception as e:
-        logging.error(f"MQTT连接失败: {e}")
+        logging.error(f"运行时错误: {e}")
         exit(1)
