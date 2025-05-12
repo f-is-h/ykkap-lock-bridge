@@ -2,6 +2,7 @@ import os
 import io
 import sys
 import time
+import signal
 import logging
 import datetime
 import schedule
@@ -9,7 +10,7 @@ import functools
 import subprocess
 from PIL import Image
 import paho.mqtt.client as mqtt
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 
 # 设置日志级别
 LOGGING_LEVEL = os.environ.get('LOGGING_LEVEL', 'INFO')
@@ -44,28 +45,37 @@ COLOR_TOLERANCE = 10              # 定义颜色匹配的容差
 START_HOUR = 7
 STOP_HOUR = 22
 
+# 控制每日重启
+DAILY_REBOOT_ENABLED = False
+
 # 全局变量用于存储MQTT客户端
 mqtt_client = None
 
 def setup_logging():
     """配置日志系统"""
+    os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs'), exist_ok=True)
+    log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'doorlock.log')
+    
     log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     
-    # 获取当前脚本的目录
-    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-    LOG_FILE = os.path.join(CURRENT_DIR, 'doorlock.log')
-    
-    # 创建一个 RotatingFileHandler
-    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3)
+    # 创建 TimedRotatingFileHandler
+    file_handler = TimedRotatingFileHandler(
+        log_file,
+        when='midnight',          # 每天午夜切换日志文件
+        interval=1,               # 每1天切换一次
+        backupCount=30,           # 保留30天的日志
+        encoding='utf-8'
+    )
+    file_handler.suffix = '%Y%m%d.log'  # 日志文件后缀格式
     file_handler.setFormatter(log_formatter)
     file_handler.setLevel(LOGGING_LEVEL)
     
-    # 创建一个 StreamHandler 用于控制台输出
+    # 创建控制台处理器
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(log_formatter)
     console_handler.setLevel(LOGGING_LEVEL)
     
-    # 获取根日志记录器并添加处理器
+    # 配置根日志记录器
     root_logger = logging.getLogger()
     root_logger.setLevel(LOGGING_LEVEL)
     root_logger.addHandler(file_handler)
@@ -73,14 +83,25 @@ def setup_logging():
 
 def check_adb_connection():
     """检查ADB连接状态"""
-    cmd = f"adb connect {ADB_DEVICE}"
-    try:
-        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
-        logging.info(f"ADB连接结果: {result.stdout.strip()}")
-        return "connected" in result.stdout.lower()
-    except subprocess.CalledProcessError as e:
-        logging.error(f"ADB连接失败: {e}")
-        return False
+    if ':' in ADB_DEVICE:  # 如果包含冒号，表示网络连接
+        cmd = f"adb connect {ADB_DEVICE}"
+        try:
+            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+            logging.info(f"ADB网络连接结果: {result.stdout.strip()}")
+            return "connected" in result.stdout.lower()
+        except subprocess.CalledProcessError as e:
+            logging.error(f"ADB网络连接失败: {e}")
+            return False
+    else:  # USB连接
+        cmd = "adb devices"
+        try:
+            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+            logging.info(f"ADB设备列表: {result.stdout.strip()}")
+            # 检查设备序列号是否在列表中且状态为device
+            return f"{ADB_DEVICE}\tdevice" in result.stdout
+        except subprocess.CalledProcessError as e:
+            logging.error(f"ADB命令执行失败: {e}")
+            return False
 
 def reconnect_adb(device):
     '''重新连接adb'''
@@ -306,7 +327,8 @@ def is_app_running():
         return "com.alpha.lockapp/.MainActivity" in output
     except subprocess.CalledProcessError:
         logging.error("检查应用状态时出错!")
-        return False
+        # 检查应用状态出错不意味着应用未在运行无需执行启动应用逻辑否则会导致错误
+        return True
 
 @ensure_adb_connection
 def launch_app():
@@ -358,6 +380,9 @@ def schedule_daily_reboot():
 
 def daily_reboot_and_initialize():
     """每日重启和初始化流程"""
+    if not DAILY_REBOOT_ENABLED:
+        logging.info("每日重启功能已禁用，跳过重启")
+        return
     reboot_android_device()
     retry_count = 3
     while retry_count > 0:
@@ -397,8 +422,30 @@ def run_pending_and_get_next_run():
     schedule.run_pending()
     return schedule.idle_seconds()
 
+def signal_handler(signum, frame):
+    """处理终止信号"""
+    signal_name = signal.Signals(signum).name
+    logging.info(f"收到终止信号 {signal_name}，程序正在关闭...")
+    
+    # 清理 MQTT 连接
+    if mqtt_client:
+        try:
+            mqtt_client.publish(MQTT_STATE_TOPIC, "OFFLINE")
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+            logging.info("MQTT 连接已关闭")
+        except Exception as e:
+            logging.error(f"关闭 MQTT 连接时发生错误: {e}")
+    
+    logging.info("程序已完全关闭")
+    sys.exit(0)
+
 # 主程序
 if __name__ == "__main__":
+    # 注册信号处理器
+    signal.signal(signal.SIGTERM, signal_handler)  # 终止信号
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+
     # 设置日志
     setup_logging()
     logging.info("智能门锁程序启动...")
