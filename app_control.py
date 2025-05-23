@@ -176,6 +176,63 @@ def wait_for_device_after_reboot(max_wait_time=300, check_interval=10):
     return False
 
 @ensure_adb_connection
+def is_screen_locked():
+    """检查屏幕是否锁定"""
+    cmd = f"adb -s {ADB_DEVICE} shell dumpsys window | grep -E 'mDreamingLockscreen=true|isKeyguardShowing=true'"
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        return bool(result.stdout.strip())  # 如果有输出则表示屏幕锁定
+    except subprocess.CalledProcessError as e:
+        logging.error(f"检查屏幕锁定状态失败: {e}")
+        return False  # 失败时假设未锁定以尝试直接执行命令
+
+def ensure_screen_unlocked(func):
+    """装饰器：确保在执行函数前屏幕处于解锁状态"""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            # 检查屏幕是否锁定
+            if is_screen_locked():
+                logging.info(f"执行{func.__name__}前检测到屏幕锁定，正在解锁...")
+                if not unlock_device_new():
+                    logging.error(f"屏幕解锁失败，无法执行{func.__name__}!")
+                    raise Exception("解锁屏幕失败")
+                logging.info("屏幕解锁成功，继续执行操作")
+            # 执行原函数
+            return func(*args, **kwargs)
+        except Exception as e:
+            logging.error(f"确保屏幕解锁时出错: {e}")
+            raise
+    return wrapper
+
+def unlock_device_new():
+    """使用keyevent 82解锁设备屏幕"""
+    logging.info("正在使用keyevent 82解锁设备屏幕...")
+    cmd = f"adb -s {ADB_DEVICE} shell input keyevent 82"
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+        logging.info("发送解锁命令成功")
+        time.sleep(1)  # 等待解锁命令生效
+        
+        # 验证解锁是否成功
+        if is_screen_locked():
+            logging.warning("keyevent 82未能解锁屏幕，尝试滑动解锁...")
+            # 尝试滑动解锁作为备选方案
+            cmd_swipe = f"adb -s {ADB_DEVICE} shell input swipe 540 1800 540 800"
+            subprocess.run(cmd_swipe, shell=True, check=True)
+            time.sleep(2)  # 等待滑动解锁动作完成
+            
+            if is_screen_locked():
+                logging.error("所有解锁尝试均失败")
+                return False
+        
+        logging.info("设备屏幕解锁成功")
+        return True
+    except subprocess.CalledProcessError as e:
+        logging.error(f"解锁设备屏幕时出错: {e}")
+        return False
+
+@ensure_adb_connection
 def unlock_device():
     """解锁设备屏幕"""
     logging.info("正在解锁设备屏幕...")
@@ -190,7 +247,7 @@ def unlock_device():
         return False
     return True
 
-@ensure_adb_connection
+@ensure_screen_unlocked
 def turn_off_screen():
     """关闭手机屏幕函数"""
     cmd = f"adb -s {ADB_DEVICE} shell CLASSPATH=/mnt/sdcard/Documents/DisplayToggle.dex app_process / DisplayToggle 0"
@@ -223,9 +280,9 @@ def on_message(client, userdata, msg):
     elif msg.topic == MQTT_CHECK_TOPIC:
         check_and_publish_status(client)
 
-@ensure_adb_connection
+@ensure_screen_unlocked
 def release_sleep_mode():
-    """解除Android设备的睡眠模式"""
+    """解除App的睡眠模式"""
     cmd_release_sleep = f"adb -s {ADB_DEVICE} shell input tap {RELEASE_SLEEP_MODE}"
     try:
         subprocess.run(cmd_release_sleep, shell=True, check=True)
@@ -234,6 +291,7 @@ def release_sleep_mode():
     except subprocess.CalledProcessError as e:
         logging.error(f"执行【スリープモード解除】操作失败: {e}")
 
+@ensure_screen_unlocked
 def check_lock_status():
     """检查门锁状态"""
     release_sleep_mode()
@@ -264,8 +322,8 @@ def capture_screen():
     result = subprocess.run(cmd, shell=True, capture_output=True)
     return Image.open(io.BytesIO(result.stdout))
 
-@ensure_adb_connection
-def control_lock(action, client, retry=2):
+@ensure_screen_unlocked
+def control_lock(action, client, retry=3):
     """控制门锁的锁定或解锁"""
     release_sleep_mode()
 
@@ -276,14 +334,20 @@ def control_lock(action, client, retry=2):
         logging.info(f"执行{action}操作")
         time.sleep(3)  # 等待操作完成
         
+        # 取得最新锁定状态
         status = check_lock_status()
-        if status == "unlinked":
-            logging.warning("门锁未连接,无法执行操作!")
-            client.publish(MQTT_STATE_TOPIC, "UNLINKED")
-        elif (action == "unlock" and status == "unlocked") or (action == "lock" and status == "locked"):
+        
+        # 只有在操作成功时提前返回
+        if (action == "unlock" and status == "unlocked") or (action == "lock" and status == "locked"):
             logging.info(f"{action}操作成功.")
             client.publish(MQTT_STATE_TOPIC, status.upper())
-        elif retry > 0:
+            return
+
+        # 对所有不成功的情况统一处理（包括 unlinked 状态）
+        logging.warning(f"{action}操作未成功，当前状态: {status}")
+        
+        # 重试逻辑
+        if retry > 0:
             logging.warning(f"{action}操作未成功,重试...")
             save_screenshot(action, True)  # 保存屏幕截图
             retry -= 1
@@ -318,7 +382,7 @@ def if_app_is_not_running_then_open_it():
         logging.info("应用未运行，正在启动应用...")
         launch_app()
 
-@ensure_adb_connection
+@ensure_screen_unlocked
 def is_app_running():
     """检查指定的应用是否在前台运行"""
     cmd = "adb shell \"su -c 'dumpsys activity activities | grep mResumedActivity'\""
@@ -330,7 +394,7 @@ def is_app_running():
         # 检查应用状态出错不意味着应用未在运行无需执行启动应用逻辑否则会导致错误
         return True
 
-@ensure_adb_connection
+@ensure_screen_unlocked
 def launch_app():
     """启动指定的应用并点击OK按钮"""
     cmd = "adb shell am start -n com.alpha.lockapp/.MainActivity"
